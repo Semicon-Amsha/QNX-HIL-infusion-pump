@@ -16,12 +16,6 @@ This is a classroom prototype. It is not certified medical software and should n
   - Handles UART packets, motor state, LED output, and button-based fault injection.
 - `FINAL_REPORT.pdf` and `FINAL_REPORT.docx`
   - Final project report.
-- `Review2_Report.pdf` and `Review2_Report.docx`
-  - Earlier review report.
-- `new_plan.txt`, `reference.txt`, `read.txt`
-  - Working notes from development, including QNX boot steps and design choices.
-- `diagram-export-4-15-2026-8_54_49-PM.png`
-  - System diagram export.
 
 ## Hardware used
 
@@ -101,13 +95,11 @@ The `codes/` folders are snapshots of the project as it grew.
 | `codes/slice3` | `alarm_mgr` and pulse-based fault reporting | Hardware validated |
 | `codes/slice4` | Heartbeat and disconnect detection | Hardware validated |
 
-Validation notes in the repo record the final hardware run on 2026-04-14.
+The slice notes record the final hardware run on 2026-04-14.
 
 ## Running the QNX side
 
 The QNX image used in this project has a read-only root filesystem. Runtime files have to go under `/var`, and `/var` is wiped on reboot.
-
-After each reboot, the Pi needed its network and SSH setup restored from the serial console. The exact one-liner used during development is in `read.txt` and `reference.txt`.
 
 For the later slices, the intended startup order is:
 
@@ -143,4 +135,4 @@ The user button is used as a fault trigger in the demo.
 - USART2 was avoided because it is routed through ST-Link on the Nucleo board.
 - QNX serial device used during development: `/dev/ser1`.
 - `slay` is used on QNX instead of `killall`.
-- The reports contain the fuller write-up. This README is only a map of the repository and demo.
+- The final report contains the fuller write-up. This README is only a map of the repository and demo.
