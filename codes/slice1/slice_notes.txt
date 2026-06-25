@@ -1,0 +1,187 @@
+SLICE NOTES
+Folder: codes/slice1
+Actual scope of this folder: Slice 2 protocol stabilization
+
+1. WHAT WE WANTED
+
+This slice was meant to move us from raw UART bring-up to a real framed protocol that both QNX and STM32 understand in the same way.
+
+The technical goals were:
+
+- define a fixed packet format
+- implement CRC8 on both sides
+- parse packets byte by byte instead of relying on raw text/echo behavior
+- support at least START, STOP, and STATUS request flows
+- make the slice testable on QNX before building the next QNX IPC layer
+
+This slice is important because every later slice depends on the protocol being stable.
+If this slice is unreliable, then message passing, fault handling, and the final demo all become hard to debug.
+
+
+2. WHAT WE DECIDED THE PROTOCOL WOULD BE
+
+Packet format:
+
+[0xAA][CMD 1B][LEN 1B][DATA nB][CRC8 1B]
+
+Rules:
+
+- 0xAA is the sync byte
+- CRC is calculated over CMD + LEN + DATA
+- CRC algorithm is CRC8-MAXIM (Dallas), reflected form
+- maximum payload length is 16 bytes
+
+Final command IDs used in this slice:
+
+- 0x01 MOTOR_START
+- 0x02 MOTOR_STOP
+- 0x03 STATUS_REQ
+- 0x04 HEARTBEAT
+- 0x05 ACK
+- 0x06 FAULT
+- 0x07 STATUS_RSP
+
+Final motor states used by STATUS_RSP:
+
+- 0x00 IDLE
+- 0x01 RUNNING
+- 0x02 FAULT
+
+
+3. HOW WE IMPLEMENTED IT ON QNX SIDE
+
+Files:
+
+- protocol.h
+- protocol.c
+- slice2_test.c
+
+protocol.h / protocol.c contain the reusable protocol layer:
+
+- command and packet constants
+- CRC8 function
+- packet builder
+- byte-wise parser state machine
+
+The parser design is intentionally simple:
+
+- wait for sync
+- read command
+- read data length
+- read data bytes
+- read CRC byte
+- validate CRC
+- either return complete packet or error
+
+This design is easier to debug on serial links than trying to read a full packet in one shot.
+
+
+4. HOW WE IMPLEMENTED IT ON STM32 SIDE
+
+The matching STM32 implementation lives in:
+
+- STM/infusion_pump_hil/Core/Inc/protocol.h
+- STM/infusion_pump_hil/Core/Src/protocol.c
+- STM/infusion_pump_hil/Core/Src/main.c
+
+The STM32 behavior for this slice is:
+
+- receive UART bytes through USART1 interrupt
+- parse framed packets using the same parser logic
+- handle START, STOP, and STATUS_REQ
+- return ACK for START/STOP
+- return STATUS_RSP for STATUS_REQ
+- return FAULT on bad CRC or invalid command
+- use the onboard LED as visible state output
+- use the user button as a fault injection source
+
+State behavior:
+
+- IDLE -> LED OFF
+- RUNNING -> LED ON
+- FAULT -> LED BLINK
+
+
+5. IMPORTANT FIXES MADE DURING THIS SLICE
+
+The first draft had a few issues that were fixed before we considered the slice ready for hardware testing.
+
+Fix 1:
+STATUS response was originally ambiguous.
+We fixed this by defining a dedicated STATUS_RSP command instead of overloading ACK.
+
+Fix 2:
+The QNX test originally accepted any valid packet as success.
+We fixed this so it only passes when the response matches the request.
+
+Fix 3:
+The QNX transmit path originally assumed write() would send the whole packet in one call.
+We fixed this by looping until the entire packet is written.
+
+Fix 4:
+STM32 packet handling was originally performed directly in the UART callback.
+We moved command execution into the main loop and kept the interrupt path lightweight.
+
+Fix 5:
+Heartbeat traffic was limited to RUNNING state so bring-up and command testing stay cleaner.
+
+
+6. WHAT THIS SLICE SHOULD PROVE TOMORROW
+
+If the hardware setup is correct, tomorrow's test should prove:
+
+- QNX can send a framed START packet and STM32 returns ACK
+- QNX can send a framed STOP packet and STM32 returns ACK
+- QNX can send a framed STATUS_REQ packet and STM32 returns STATUS_RSP with one-byte motor state
+- CRC and parser logic match on both sides
+- LED state reflects the STM32 state machine
+- button press can inject a FAULT packet
+
+Expected visible behavior:
+
+- start -> ACK -> LED ON
+- status -> STATUS_RSP with RUNNING
+- stop -> ACK -> LED OFF
+- button press -> FAULT -> LED blinking
+
+
+7. WHAT THIS SLICE DOES NOT TRY TO DO
+
+This slice does not implement:
+
+- QNX message passing between processes
+- alarm_mgr or pulses
+- heartbeat timeout handling on QNX
+- APS
+- tracelogger
+- any custom resource manager
+
+That is intentional.
+This slice is only about stabilizing the UART protocol layer before we build the next architectural layer on top.
+
+
+8. HONEST STATUS OF THIS SLICE
+
+This slice is hardware-validated in the final integrated setup.
+
+That means:
+
+- protocol logic is written
+- QNX and STM32 command contract is aligned
+- the code was tested on Raspberry Pi QNX and STM32 hardware
+- UART wiring, baud match, CRC, packet parsing, and command/reply flow were all confirmed working
+
+Validation timestamp:
+
+- 2026-04-14 Asia/Calcutta
+
+Observed confirmed behavior during hardware validation:
+
+- `slice2_test status` returned `STATUS_RSP`
+- motor state was reported as `RUNNING`
+- `slice2_test stop` returned `ACK`
+- end-to-end framed UART communication worked between QNX and STM32
+
+So the honest statement now is:
+
+"Slice 2 is complete and hardware-validated on the actual QNX + STM32 setup as of 2026-04-14."

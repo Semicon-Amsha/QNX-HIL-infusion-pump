@@ -1,0 +1,12 @@
+../Core/Src/main.c:23:13:set_motor_state	16	static
+../Core/Src/main.c:32:13:update_led	16	static
+../Core/Src/main.c:54:13:send_packet	40	static
+../Core/Src/main.c:63:13:send_fault_packet	8	static
+../Core/Src/main.c:68:13:send_heartbeat_if_due	16	static
+../Core/Src/main.c:80:13:check_fault_button	16	static
+../Core/Src/main.c:92:13:handle_packet	24	static
+../Core/Src/main.c:126:5:main	40	static
+../Core/Src/main.c:172:6:HAL_UART_RxCpltCallback	24	static
+../Core/Src/main.c:199:6:SystemClock_Config	88	static
+../Core/Src/main.c:229:6:MX_GPIO_Init	40	static
+../Core/Src/main.c:250:6:MX_USART1_UART_Init	40	static

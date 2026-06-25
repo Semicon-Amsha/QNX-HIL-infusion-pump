@@ -1,0 +1,17 @@
+#define PACKET_MAX_DATA  16
+#define PACKET_MAX_SIZE  (PACKET_MAX_DATA + 4)  // 20 bytes
+uint8_t build_packet(uint8_t cmd, uint8_t *data, uint8_t data_len, uint8_t *out_buf){
+	if (data_len > PACKET_MAX_DATA) || ((data_len>0)&&(data==NULL))
+	   return 0;
+	else{
+	out_buf[0]=0xAA;
+	out_buf[1]=cmd;
+	out_buf[2]=data_len;
+	for(int i=0; i < data_len; i++)   		   	   out_buf[i+3]=data[i];
+	unsigned char crc=crc8(&out_buf[1], 2+data_len);
+	out_buf[3+data_len]=crc;
+	return 4+data_len;}
+}
+
+	
+	

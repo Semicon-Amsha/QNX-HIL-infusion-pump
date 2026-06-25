@@ -1,0 +1,174 @@
+SLICE NOTES
+Folder: codes/slice3
+Scope of this folder: alarm_mgr and pulse-based fault notification
+
+1. WHAT WE WANTED
+
+This slice adds a separate QNX alarm process and introduces asynchronous fault notification between QNX processes using pulses.
+
+The goal is:
+
+- keep `motor_ctrl` as the owner of `/dev/ser1`
+- preserve the already working client -> motor_ctrl -> STM32 control path
+- notify a separate `alarm_mgr` process whenever a meaningful fault is observed
+
+This slice gives us a stronger QNX story because the project now has:
+
+- synchronous request/reply control via `MsgSend`
+- asynchronous fault notification via pulses
+
+
+2. WHAT THIS SLICE IS SUPPOSED TO PROVE
+
+If Slice 2 is already hardware-validated, this slice should prove:
+
+- `alarm_mgr` can run as its own named QNX process
+- `motor_ctrl` can connect to it and send pulses
+- fault conditions can be surfaced to another process without changing the client API
+
+The intended flow is:
+
+demo_client -> MsgSend -> motor_ctrl -> UART -> STM32
+fault detected in motor_ctrl -> MsgSendPulse -> alarm_mgr
+
+
+3. IMPORTANT HONEST LIMITATION
+
+This slice is still request-driven on the UART side.
+
+That means:
+
+- `motor_ctrl` reads serial data while servicing a client request
+- faults are delivered to `alarm_mgr` when they are observed during a request/response transaction
+- we are NOT yet running a dedicated UART RX thread that continuously watches for spontaneous FAULT packets
+
+So this slice is a valid alarm-notification slice, but not yet the final fully asynchronous architecture.
+
+
+4. FILES IN THIS SLICE
+
+- pump_ipc.h
+- protocol.h
+- protocol.c
+- motor_ctrl.c
+- demo_client.c
+- alarm_mgr.c
+
+This slice copies the working protocol and IPC baseline from the verified previous slice and extends it with pulse definitions plus the new alarm manager process.
+
+
+5. WHAT WE ADDED
+
+New pieces in this slice:
+
+- alarm service name: `pump_alarm_mgr`
+- pulse codes for:
+  - UART timeout
+  - protocol error
+  - remote FAULT packet
+- `alarm_mgr.c` to receive and log pulses
+- `motor_ctrl.c` logic to send pulses using `MsgSendPulse`
+
+
+6. HOW alarm_mgr WORKS
+
+`alarm_mgr` is a small named server process.
+
+Responsibilities:
+
+- create a public name using `name_attach`
+- wait on `MsgReceive`
+- handle incoming pulses
+- print which fault happened and the associated value
+
+In this slice it is intentionally simple and mostly acts as a visible alarm sink for the demo.
+
+
+7. HOW motor_ctrl CHANGED IN THIS SLICE
+
+The control path remains the same for normal commands.
+
+The new behavior is:
+
+- on UART timeout, send `PULSE_FAULT_UART_TIMEOUT`
+- on CRC/protocol mismatch, send `PULSE_FAULT_PROTOCOL_ERROR`
+- on STM32 `FAULT` packet, send `PULSE_FAULT_REMOTE_FAULT`
+
+The client still gets its normal reply status, so pulses are an addition, not a replacement.
+
+
+8. HOW TO TEST THIS SLICE
+
+Recommended startup order:
+
+1. start `alarm_mgr`
+2. start `motor_ctrl`
+3. use `demo_client start/status/stop` to confirm normal path still works
+
+Normal path should remain unchanged from the verified previous slice.
+
+To test the alarm path, use a fault scenario.
+
+Practical demo path with current firmware:
+
+1. `demo_client start`
+2. press the STM32 fault button so the STM32 enters FAULT state
+3. run `demo_client start` again
+
+Why this works:
+
+- once STM32 is in FAULT state, another `START` request should cause STM32 to reply with a `FAULT` packet
+- `motor_ctrl` should detect that and send a pulse to `alarm_mgr`
+- `alarm_mgr` should print the pulse details
+
+
+9. WHAT COUNTS AS SUCCESS
+
+This slice is successful if we can honestly demonstrate:
+
+- normal control still works through `motor_ctrl`
+- `alarm_mgr` starts and waits for pulses
+- a real fault condition causes `alarm_mgr` to print a pulse event
+- the client also receives an error status instead of fake success
+
+
+10. WHAT THIS SLICE STILL DOES NOT DO
+
+This slice does not yet implement:
+
+- background UART RX thread
+- heartbeat miss detection
+- automatic emergency stop policy in QNX
+- persistent alarm history
+- APS integration
+
+Those can be added later if time remains.
+
+
+11. HONEST STATUS OF THIS SLICE
+
+This slice is hardware-validated in the final integrated setup.
+
+That means:
+
+- `alarm_mgr` built and ran on QNX hardware
+- `motor_ctrl` successfully sent fault pulses to `alarm_mgr`
+- a normal `START` request still returned `ACK`
+- after STM32 entered fault state, a later `START` returned `REMOTE_FAULT`
+- `alarm_mgr` printed the expected `REMOTE_FAULT` pulse
+
+Validation timestamp:
+
+- 2026-04-14 Asia/Calcutta
+
+Observed confirmed behavior during hardware validation:
+
+- `alarm_mgr` printed `REMOTE_FAULT (code=3 value=1)`
+- `motor_ctrl` logged `STM32 reported FAULT packet`
+- `demo_client start` first returned `OK`
+- a later `demo_client start` returned `REMOTE_FAULT (-4)`
+- STM32 LED continued blinking while fault state remained active
+
+So the honest statement now is:
+
+"This alarm notification slice is complete and hardware-validated on the actual QNX + STM32 setup as of 2026-04-14."

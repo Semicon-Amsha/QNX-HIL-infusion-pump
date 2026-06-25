@@ -1,0 +1,151 @@
+SLICE NOTES
+Folder: codes/slice4
+Scope of this folder: heartbeat/disconnect detection
+
+1. WHAT WE WANTED
+
+This slice extends the verified alarm slice with autonomous heartbeat monitoring.
+
+The goal is:
+
+- keep the verified control path intact conceptually
+- detect STM32 heartbeats continuously in the background
+- raise an alarm when heartbeats stop arriving for too long
+- return a meaningful status to the client if a command is attempted after heartbeat loss
+
+
+2. WHY THIS SLICE IS DIFFERENT
+
+The previous slices were mostly request-driven.
+
+Heartbeat detection is different because:
+
+- heartbeats arrive asynchronously
+- detection must keep running even when no client request is active
+- a timeout must be detected by QNX itself
+
+So this slice intentionally introduces more architecture:
+
+- background UART RX thread
+- background heartbeat monitor thread
+- shared controller state protected by mutex/condition variable
+
+
+3. WHAT THIS SLICE IS SUPPOSED TO PROVE
+
+If the previous verified slices already work, this slice should prove:
+
+- `motor_ctrl` can parse UART traffic continuously in the background
+- heartbeats from STM32 are tracked even without a client command in flight
+- missing heartbeat triggers a pulse to `alarm_mgr`
+- later client requests can fail with `HEARTBEAT_MISS`
+
+
+4. FILES IN THIS SLICE
+
+- pump_ipc.h
+- protocol.h
+- protocol.c
+- demo_client.c
+- alarm_mgr.c
+- motor_ctrl.c
+
+This slice is kept separate so the verified earlier slices remain untouched.
+
+
+5. WHAT WE ADDED
+
+New pieces in this slice:
+
+- `PUMP_STATUS_HEARTBEAT_MISS`
+- `PULSE_FAULT_HEARTBEAT_MISS`
+- UART RX thread for continuous framed packet parsing
+- heartbeat monitor thread with a 2 second timeout
+
+
+6. HEARTBEAT RULE IN THIS SLICE
+
+Current rule:
+
+- once at least one heartbeat has been seen
+- if no new heartbeat arrives for more than 2000 ms
+- QNX sends `PULSE_FAULT_HEARTBEAT_MISS` to `alarm_mgr`
+- future client requests fail with `HEARTBEAT_MISS`
+
+This is a practical hackathon rule and not yet a full recovery strategy.
+
+
+7. IMPORTANT HONEST LIMITATIONS
+
+This slice is more complex and less verified than the earlier ones.
+
+Known limitations:
+
+- it still assumes one client request at a time
+- it does not implement automatic recovery after heartbeat miss
+- it does not yet force an automatic `MOTOR_STOP` packet on heartbeat loss
+- STM32 heartbeat behavior must already be working for this slice to be meaningful
+
+
+8. HOW TO TEST THIS SLICE
+
+Recommended order:
+
+1. start `alarm_mgr`
+2. start `motor_ctrl`
+3. confirm normal `demo_client start/status/stop` still works
+4. start the motor again so STM32 is in RUNNING and sending heartbeats
+5. break the heartbeat source:
+   - disconnect UART
+   - reset STM32
+   - or modify STM32 behavior so heartbeats stop
+6. wait more than 2 seconds
+7. observe `alarm_mgr` printing `HEARTBEAT_MISS`
+8. run `demo_client status` or `demo_client stop`
+
+Expected result after heartbeat miss:
+
+- `alarm_mgr` prints `HEARTBEAT_MISS`
+- client receives status `HEARTBEAT_MISS`
+
+
+9. WHAT COUNTS AS SUCCESS
+
+This slice is successful if we can honestly demonstrate:
+
+- normal operation while heartbeats are present
+- heartbeat loss detected by QNX without needing a new incoming client request
+- pulse delivered to `alarm_mgr`
+- client requests reflect the degraded state after disconnect
+
+
+10. HONEST STATUS OF THIS SLICE
+
+This slice is hardware-validated in the final integrated setup.
+
+That means:
+
+- background heartbeat monitoring worked on QNX hardware
+- `motor_ctrl` detected heartbeat loss and sent a heartbeat-miss pulse
+- `alarm_mgr` received and printed `HEARTBEAT_MISS`
+- client requests after disconnect/heartbeat loss failed with status code `-6`
+
+Validation timestamp:
+
+- 2026-04-14 Asia/Calcutta
+
+Observed confirmed behavior during hardware validation:
+
+- `alarm_mgr` printed `HEARTBEAT_MISS (code=4 value=2000)`
+- `motor_ctrl` logged `alarm pulse sent: code=4 value=2000`
+- client requests after heartbeat loss returned status `-6`
+- fault and heartbeat alarm behavior both worked on the real setup
+
+Note:
+
+- if the client prints `UNKNOWN (-6)` instead of `HEARTBEAT_MISS`, that means the heartbeat-aware client binary was not the one currently being run
+- the underlying heartbeat/disconnect logic still worked, because the returned code and alarm pulse were correct
+
+So the honest statement now is:
+
+"This heartbeat/disconnect detection slice is complete and hardware-validated on the actual QNX + STM32 setup as of 2026-04-14."

@@ -1,0 +1,241 @@
+
+# QNX Infusion Pump HIL Project — Master Context Document
+
+## Project Identity
+- **Course:** 21IPE314P / RTOS Programming, SRM Institute of Science and Technology
+- **Project Title:** Hardware-in-the-Loop Medical Infusion Pump Controller using QNX Neutrino RTOS with Adaptive Partitioning and IEC 62304 Class C Compliance Validation
+- **Students:** 2-person batch
+- **Supervisors:** Dr. S. Dhanalakshmi and Dr. Jaba Deva Krupa A
+
+---
+
+## Hardware
+
+### Raspberry Pi 4B
+- 4GB RAM, AArch64, Cortex-A72
+- Running: PISQUARE QNX Neutrino 8.0.0 (2025/01/16 build)
+- Boot: SD card, read-only IFS filesystem
+- Network: Static IP `192.168.1.50` (set manually each boot)
+- Serial: `/dev/ser1` via `devc-serminiuart` at 115200 baud, `-c500000000 -e -F -u1 0xfe215000,125`
+
+### STM32 Nucleo-F401RE
+- ARM Cortex-M4, 84MHz
+- UART used: **USART1 on PA9(TX) and PA10(RX)** — NOT USART2 (USART2 is internally routed to ST-Link)
+- Baud: 115200, 8N1
+- LED: PA5 (LD2 onboard)
+- Button: PC13 (occlusion fault injection)
+- Development: STM32CubeIDE on Windows PC
+
+### Physical UART Wiring
+```
+STM32 PA9  (TX) → Pi GPIO15 Pin10 (RX)
+STM32 PA10 (RX) → Pi GPIO14 Pin8  (TX)
+STM32 GND       → Pi Pin6   (GND)
+```
+- 3.3V logic, no level shifter needed
+- STM32 powered via USB to PC
+
+---
+
+## Development Machine
+- Windows PC, username: shukl
+- QNX SDP 8.0 installed (exact path TBD)
+- Momentics IDE 8.0 — used for cross-compilation and deployment via qconn
+- STM32CubeIDE 1.14+
+- SSH key: `C:\Users\shukl\.ssh\id_ed25519`
+
+---
+
+## Critical QNX Boot Ritual
+**Every reboot, paste this one-liner in PuTTY serial console:**
+```bash
+ifconfig genet0 192.168.1.50 netmask 255.255.255.0 && route add default 192.168.1.1 && mkdir -p /var/.ssh && chmod 700 /var/.ssh && echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPlZLgrbMQe91VmT0E0deQdNDaiK39QlAgp5KkQTztkX shukl@pegasus" > /var/.ssh/authorized_keys && chmod 600 /var/.ssh/authorized_keys && cat /etc/ssh/sshd_config > /var/sshd_final && echo "AuthorizedKeysFile /var/.ssh/authorized_keys" >> /var/sshd_final && echo "PermitRootLogin yes" >> /var/sshd_final && echo "StrictModes no" >> /var/sshd_final && slay sshd ; /usr/sbin/sshd -f /var/sshd_final -o "AuthorizedKeysFile /var/.ssh/authorized_keys" && dhcpcd -f /var/dhcpcd_static.conf
+```
+
+**Then SSH from Windows CMD:**
+```cmd
+ssh -i %USERPROFILE%\.ssh\id_ed25519 root@192.168.1.50
+```
+
+**If host key warning appears:**
+```cmd
+ssh-keygen -R 192.168.1.50
+```
+
+---
+
+## QNX Filesystem Facts
+- `/` — IFS, completely read-only, cannot be remounted
+- `/var` — RAM filesystem, writable but wiped on every reboot
+- `/etc/passwd` root home = `/root` (read-only, cannot create `.ssh` there)
+- No `stty`, no `killall`, no `telnetd` in this image
+- Available in `/usr/sbin/`: `sshd`, `qconn`, `devctl`, `dumper`, `tracelogger`
+- Use `slay` instead of `kill`, `slay -f` instead of `killall`
+
+---
+
+## QNX Serial Driver Facts
+- Driver: `devc-serminiuart` (Mini UART, not PL011)
+- Device: `/dev/ser1`
+- Started automatically at boot
+- Restart command if needed:
+```bash
+slay devc-serminiuart
+devc-serminiuart -b115200 -c500000000 -e -F -u1 0xfe215000,125 &
+waitfor /dev/ser1
+```
+
+---
+
+## Packet Protocol (Finalized)
+```
+[0xAA][CMD 1B][LEN 1B][DATA nB][CRC8 1B]
+```
+
+### Command IDs
+| ID | Name | Direction | Description |
+|---|---|---|---|
+| 0x01 | MOTOR_START | QNX→STM32 | Start motor |
+| 0x02 | MOTOR_STOP | QNX→STM32 | Stop motor |
+| 0x03 | STATUS_REQ | QNX→STM32 | Request status |
+| 0x04 | HEARTBEAT | STM32→QNX | 500ms keepalive |
+| 0x05 | ACK | STM32→QNX | Command acknowledged |
+| 0x06 | FAULT | STM32→QNX | Fault detected |
+
+### CRC8 Polynomial
+- **CRC8-MAXIM (Dallas)** polynomial `0x31`
+- Must be identical on both STM32 and QNX sides
+
+### Fault Rule (Universal)
+Any of these → immediate MOTOR_STOP + fault pulse to alarm_mgr:
+- CRC mismatch
+- Unknown command received
+- No heartbeat for 2 seconds
+- UART response timeout (500ms)
+- STM32 sends 0x06 FAULT packet
+
+---
+
+## QNX Process Architecture
+```
+motor_ctrl  APS 40% → owns /dev/pump_motor + UART RX/TX
+alarm_mgr   APS 20% → receives fault pulses via MsgDeliverEvent
+logger      APS 20% → UI + logging
+cpu_hog     APS 10% → stress test for APS demonstration
+system      APS 10% → kernel + drivers
+```
+
+### motor_ctrl Internal Threading
+```
+motor_ctrl process
+├── Dispatch thread  — MsgReceive loop, handles /dev/pump_motor clients
+├── UART TX          — called from dispatch thread only (mutex protected)
+└── UART RX thread   — blocking read, parses packets, delivers fault pulses
+```
+- One mutex protects UART fd for TX
+- RX thread only reads and parses, never writes to UART directly
+
+### IPC Flow (Normal)
+```
+App → write("/dev/pump_motor") → MsgSend → motor_ctrl dispatch
+→ UART TX → STM32 → ACK → motor_ctrl → MsgReply → App unblocks
+```
+
+### IPC Flow (Fault)
+```
+STM32 FAULT packet → UART RX thread → MsgDeliverEvent(pulse)
+→ alarm_mgr MsgReceivePulse → prints/logs → motor stopped
+```
+
+---
+
+## STM32 State Machine
+```
+IDLE ──START──► RUNNING ──STOP──► IDLE
+                   │
+                 FAULT
+                   │
+              EMERGENCY_STOP ──► IDLE
+```
+- LED PA5: OFF=IDLE, ON=RUNNING, BLINK=FAULT
+- Button PC13: injects occlusion fault
+- Invalid state transitions → NACK response
+
+---
+
+## Tracelogger Measurements (Must Capture)
+| ID | Measurement | Requirement |
+|---|---|---|
+| T1 | UART RX interrupt → motor_ctrl reaction | < 25 µs |
+| T2 | Fault detected → alarm_mgr pulse delivery | < 5 ms |
+| T3 | motor_ctrl CPU time under cpu_hog stress | maintains 40% budget |
+| T4 | Heartbeat miss → emergency stop latency | < 2.5 s |
+
+---
+
+## Build Order — Vertical Slices
+Each slice is a fully working system. Never break a previous slice.
+
+| Slice | What | Test |
+|---|---|---|
+| 1 ✅ | Raw UART bidirectional | `CMD:START` echoed back |
+| 2 | Framed packet + CRC8 | ACK received, LED responds |
+| 3 | QNX resource manager `/dev/pump_motor` | `echo START > /dev/pump_motor` works |
+| 4 | STM32 state machine + LED visual | LED reflects state at all times |
+| 5 | APS partitions + cpu_hog | Motor works under 100% CPU load |
+| 6 | Fault injection via button | Fault pulse → alarm_mgr < 5ms |
+| 7 | Heartbeat + disconnect detection | Unplug UART → emergency stop |
+| 8 | Tracelogger instrumentation | `.kev` file with 4 measurements |
+
+---
+
+## Integration Rules
+1. Never break Slice N when building Slice N+1
+2. After each slice: `git tag sliceN-working`
+3. STM32 LED always reflects state — visual debug always on
+4. QNX prints every packet sent/received during development
+5. Never change STM32 and QNX code simultaneously
+6. One variable at a time when debugging
+
+---
+
+## Current Status
+- **Slice 1 COMPLETE** ✅
+- Bidirectional UART confirmed working
+- `uart_test.c` built in Momentics, deployed via qconn
+- STM32 using USART1 (PA9/PA10), interrupt-driven RX
+- QNX receives and sends packets via raw `/dev/ser1`
+- **Next: Slice 2 — Framed packet protocol + CRC8**
+
+---
+
+## Known Pitfalls (Learned the Hard Way)
+1. **USART2 is tied to ST-Link** — always use USART1 (PA9/PA10) for external UART
+2. **Mini UART needs explicit baud** — always restart with `-b115200 -c500000000`
+3. **`/var` wiped on reboot** — never rely on files there surviving reboot
+4. **Background `cat /dev/ser1 &`** — always `slay -f cat` before testing
+5. **sshd rexec resets config** — always start with `-o "AuthorizedKeysFile /var/.ssh/authorized_keys"`
+6. **`sleep()` segfaults on QNX** — use `delay()` or `VTIME` instead
+7. **`echo > /dev/ser1`** — doesn't configure termios, use C program for reliable UART
+8. **Loopback test crashed QNX** — never short GPIO14/15 directly
+9. **STM32 HAL_UART_Transmit in while loop blocks RX interrupt** — never put blocking TX in main loop
+10. **Multiple background cats** — use `jobs` and `slay -f cat` to clean up
+
+---
+
+## Files Created So Far
+- `uart_test.c` — QNX POSIX UART test (Slice 1 validation, Momentics project)
+- STM32 `main.c` — USART1 interrupt-driven echo firmware
+- STM32 `stm32f4xx_it.c` — USART1_IRQHandler added
+
+---
+
+## What Claude Should Know Each Session
+- Always suggest `slay` not `kill`
+- Always suggest `slay -f cat` before any serial test
+- `/var` is writable, `/` is not — all runtime files go in `/var`
+- Momentics is the compiler and deployment tool — not command line gcc
+- The boot ritual must be run after every reboot
+- We are on Slice 2 next — do not skip ahead
+- Keep responses focused on the current slice only
+- When suggesting QNX code, use QNX-specific APIs not generic POSIX where possible

@@ -1,0 +1,4 @@
+../Core/Src/protocol.c:10:9:crc8	24	static
+../Core/Src/protocol.c:35:9:build_packet	40	static
+../Core/Src/protocol.c:62:6:parser_init	16	static
+../Core/Src/protocol.c:81:5:parse_byte	40	static

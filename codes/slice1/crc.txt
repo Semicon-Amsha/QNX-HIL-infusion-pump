@@ -1,0 +1,30 @@
+
+#include <stdio.h>
+#include <stdint.h> // Include for uint8_t
+#include <string.h>
+unsigned char crc8(uint8_t *data, uint8_t len){
+	unsigned char crc= 0;
+	for (unsigned int i=0; i<len; i++){
+	   unsigned char inbyte=data[i];
+	   for(unsigned char j=0; j<8; ++j){
+		unsigned char mix= (crc ^ inbyte) & 0x01;
+		crc >>=1;
+		if (mix) crc ^= 0x8C;
+		inbyte >>=1;
+	   }
+	}
+	return crc;
+}
+
+int main(){
+uint8_t data1[]={0x05};
+uint8_t data2[]={0x01, 0x00};
+uint8_t data3[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+unsigned char tv1=crc8(data1, sizeof(data1));
+printf("CRC for {0x01}: 0x%02X\n", tv1);
+unsigned char tv2 = crc8(data2, sizeof(data2));
+printf("CRC for {0x01, 0x00}: 0x%02X\n", tv2);
+unsigned char tv3 = crc8(data3, sizeof(data3));
+printf("CRC for {'1', '2', '3', '4', '5', '6', '7', '8', '9'}: 0x%02X\n", tv3);
+return 0;
+}

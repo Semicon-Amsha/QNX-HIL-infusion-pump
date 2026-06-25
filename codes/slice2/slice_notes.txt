@@ -1,0 +1,201 @@
+SLICE NOTES
+Folder: codes/slice2
+Scope of this folder: Message-passing control server on QNX
+
+1. WHAT WE WANTED
+
+This slice is the first architectural step above raw UART protocol handling.
+
+The goal is:
+
+- stop talking to STM32 directly from a one-off test app
+- move UART ownership into one QNX server process
+- let client processes control the pump through QNX native message passing
+
+This is the slice that replaces the original resource-manager idea in our revised plan.
+We intentionally chose message passing instead of a custom resource manager because it is more realistic for our timeline and still strongly demonstrates QNX-native IPC.
+
+
+2. WHAT THIS SLICE IS SUPPOSED TO PROVE
+
+If Slice 1/2 protocol handling works, then this slice should prove:
+
+- a QNX server can own /dev/ser1
+- another QNX process can send START, STOP, and STATUS requests using MsgSend
+- the server can translate client requests into UART packets
+- the server can wait for STM32 replies and return a clean synchronous reply to the client
+
+This means our control path becomes:
+
+demo_client -> MsgSend -> motor_ctrl -> UART -> STM32 -> UART reply -> motor_ctrl -> MsgReply -> demo_client
+
+That is the exact direction we want for the final demo architecture.
+
+
+3. WHY WE KEPT THIS SLICE SIMPLE
+
+This slice deliberately does not try to do everything.
+
+We are not yet implementing:
+
+- alarm_mgr
+- pulses
+- heartbeat timeout enforcement
+- background fault routing
+- multi-threaded UART ownership on QNX
+
+Those are next-step features.
+
+For this slice, the server handles one client request at a time and performs the UART transaction synchronously.
+That is enough to validate the architecture without adding extra debugging risk.
+
+
+4. FILES IN THIS SLICE
+
+- pump_ipc.h
+- protocol.h
+- protocol.c
+- motor_ctrl.c
+- demo_client.c
+
+The protocol layer is copied into this slice on purpose so the folder can be built as a self-contained next-step project in Momentics.
+That reduces hackathon friction even though it introduces some duplication.
+
+
+5. HOW WE IMPLEMENTED THE IPC CONTRACT
+
+We defined a very small request/reply interface.
+
+Request structure:
+
+- message type
+- sequence number
+- command
+- payload length
+- payload buffer
+
+Reply structure:
+
+- status code
+- response command
+- payload length
+- payload buffer
+
+The command set currently exposed to clients is:
+
+- start
+- stop
+- status
+
+The status codes currently used are:
+
+- OK
+- TIMEOUT
+- IO_ERROR
+- PROTOCOL_ERROR
+- REMOTE_FAULT
+- BAD_REQUEST
+
+This is enough for debugging and demo use without making the API complicated.
+
+
+6. HOW motor_ctrl WORKS
+
+motor_ctrl is implemented as a named QNX server.
+
+Main responsibilities:
+
+- create a public name using name_attach
+- open and configure /dev/ser1
+- wait for client messages using MsgReceive
+- validate each command
+- build the UART packet using the protocol layer
+- send it to STM32
+- wait for the matching framed response
+- return a structured reply using MsgReply
+
+Important design choices:
+
+- only motor_ctrl touches /dev/ser1
+- the UART transaction is synchronous per client request
+- heartbeat packets are ignored while waiting for the command-specific reply
+- FAULT packets are returned to the client as REMOTE_FAULT
+- STATUS_REQ only succeeds if STM32 returns STATUS_RSP with a one-byte state payload
+
+This keeps the server behavior strict and easy to reason about.
+
+
+7. HOW demo_client WORKS
+
+demo_client is intentionally tiny.
+
+Responsibilities:
+
+- connect to motor_ctrl using name_open
+- convert a command-line word into a protocol command
+- send one request using MsgSend
+- print the reply status and decoded state
+
+This replaces the earlier direct-serial test style for the next architectural layer.
+
+
+8. WHAT IS STILL ASSUMED IN THIS SLICE
+
+This slice assumes the previous protocol slice works correctly.
+
+That means:
+
+- serial framing is correct
+- CRC matches between QNX and STM32
+- START returns ACK
+- STOP returns ACK
+- STATUS_REQ returns STATUS_RSP
+
+If those assumptions fail on hardware, this slice will also fail, because it builds directly on that contract.
+
+
+9. WHAT TO TEST WHEN THIS SLICE IS REACHED
+
+When we test this slice on QNX, the expected startup flow is:
+
+1. start motor_ctrl
+2. run demo_client start
+3. run demo_client status
+4. run demo_client stop
+
+Expected results:
+
+- start -> OK + ACK
+- status -> OK + STATUS_RSP + one-byte motor state
+- stop -> OK + ACK
+
+If STM32 injects a FAULT or replies incorrectly, the client should receive a non-zero status code instead of a fake success.
+
+
+10. HONEST STATUS OF THIS SLICE
+
+This slice is hardware-validated in the final integrated setup.
+
+That means:
+
+- `motor_ctrl` built and ran on QNX hardware
+- `demo_client` successfully connected using `name_open`
+- `START`, `STATUS`, and `STOP` all worked through QNX message passing
+- the UART path still behaved correctly when mediated by `motor_ctrl`
+- STM32 state was reported correctly as `RUNNING` and later `IDLE`
+
+Validation timestamp:
+
+- 2026-04-14 Asia/Calcutta
+
+Observed confirmed behavior during hardware validation:
+
+- `demo_client start` returned `OK` with `ACK`
+- `demo_client status` returned `OK` with `STATUS_RSP`
+- motor state was reported as `RUNNING`
+- `demo_client stop` returned `OK` with `ACK`
+- a later `demo_client status` returned motor state `IDLE`
+
+So the honest statement now is:
+
+"This message-passing control slice is complete and hardware-validated on the actual QNX + STM32 setup as of 2026-04-14."
